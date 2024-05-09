@@ -1,7 +1,17 @@
 use authenticator::{
-    crypto::{COSEEC2Key, COSEKey, COSEKeyType}, ctap2::{attestation::{
-        AttestationStatement, AttestationStatementPacked, AttestedCredentialData, AuthenticatorData,
-    }, commands::credential_management::{CredentialList, CredentialListEntry, CredentialRpListEntry}, server::{PublicKeyCredentialDescriptor, PublicKeyCredentialUserEntity, RelyingParty}}, Assertion, AttestationObject, CredentialManagementResult, GetAssertionResult, MakeCredentialsResult
+    crypto::{COSEEC2Key, COSEKey, COSEKeyType},
+    ctap2::{
+        attestation::{
+            AttestationStatement, AttestationStatementPacked, AttestedCredentialData,
+            AuthenticatorData,
+        },
+        commands::credential_management::{
+            CredentialList, CredentialListEntry, CredentialRpListEntry,
+        },
+        server::{PublicKeyCredentialDescriptor, PublicKeyCredentialUserEntity, RelyingParty},
+    },
+    Assertion, AttestationObject, CredentialManagementResult, GetAssertionResult,
+    MakeCredentialsResult,
 };
 use base64::Engine;
 
@@ -169,7 +179,10 @@ impl PrettyDesc for GetAssertionResult {
 
 impl PrettyDesc for RelyingParty {
     fn desc_lines(&self) -> Vec<String> {
-        vec![format!("RelyingParty - (ID: \"{}\", Name: \"{:?}\")", self.id, self.name)]
+        vec![format!(
+            "RelyingParty - (ID: \"{}\", Name: \"{:?}\")",
+            self.id, self.name
+        )]
     }
 }
 
@@ -179,7 +192,10 @@ impl PrettyDesc for CredentialListEntry {
         lines.extend(self.user.child_desc());
         lines.extend(self.credential_id.child_desc());
         lines.extend(self.public_key.child_desc());
-        lines.push(format!("    Credential Protection Policy: {}", self.cred_protect));
+        lines.push(format!(
+            "    Credential Protection Policy: {}",
+            self.cred_protect
+        ));
         lines.push(format!("    Large Blob Key: {:?}", self.large_blob_key));
         lines
     }
@@ -189,7 +205,10 @@ impl PrettyDesc for CredentialRpListEntry {
     fn desc_lines(&self) -> Vec<String> {
         let mut lines = vec!["RPEntry:".to_string()];
         lines.extend(self.rp.child_desc());
-        lines.push(format!("    RP ID Hash: {}", base64_encode(&self.rp_id_hash)));
+        lines.push(format!(
+            "    RP ID Hash: {}",
+            base64_encode(&self.rp_id_hash)
+        ));
         for cred in self.credentials.iter() {
             lines.extend(cred.child_desc());
         }
@@ -199,9 +218,13 @@ impl PrettyDesc for CredentialRpListEntry {
 
 impl PrettyDesc for CredentialList {
     fn desc_lines(&self) -> Vec<String> {
+        let count = self.existing_resident_credentials_count;
+        let max_count = count + self.max_possible_remaining_resident_credentials_count;
         let mut lines = vec!["CredentialList:".to_string()];
-        lines.push(format!("    Count: {}", self.existing_resident_credentials_count));
-        lines.push(format!("    Max possible remaining credentials: {}", self.max_possible_remaining_resident_credentials_count));
+        lines.push(format!(
+            "    Credential Count: {} (Maximum: {})",
+            count, max_count
+        ));
         for credential in self.credential_list.iter() {
             lines.extend(credential.child_desc());
         }

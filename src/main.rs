@@ -1,17 +1,35 @@
 mod pretty_desc;
 
 use authenticator::{
-    authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs}, crypto::COSEAlgorithm, ctap2::{commands::credential_management::CredentialList,  server::{
-        AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters,
-        PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement,
-        UserVerificationRequirement,
-    }}, errors::AuthenticatorError, statecallback::StateCallback, CredManagementCmd::GetCredentials, CredentialManagementResult, InteractiveRequest::{CredentialManagement, Quit}, InteractiveUpdate, Pin, StatusPinUv, StatusUpdate
+    authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
+    crypto::COSEAlgorithm,
+    ctap2::{
+        commands::credential_management::CredentialList,
+        server::{
+            AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters,
+            PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement,
+            UserVerificationRequirement,
+        },
+    },
+    statecallback::StateCallback,
+    CredManagementCmd::GetCredentials,
+    CredentialManagementResult,
+    InteractiveRequest::{CredentialManagement, Quit},
+    InteractiveUpdate::{CredentialManagementUpdate, StartManagement},
+    Pin, StatusPinUv,
+    StatusUpdate::{self, InteractiveManagement, PinUvError},
 };
+use getopts::Options;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
 use std::{
-    sync::mpsc::{channel, RecvError, Sender},
-    thread::{self, spawn},
+    env,
+    ops::Deref,
+    sync::{
+        mpsc::{channel, Receiver, RecvError, Sender},
+        Arc, Mutex,
+    },
+    thread,
 };
 
 /*
@@ -27,48 +45,80 @@ static USERNAME: &str = "username";
 static USER_ID: &str = "userid";
 static RP_NAME: &str = "Example";
 static ORIGIN: &str = "https://example.com";
-static DEFAULT_PIN: &str = "1234";
 
 static TIMEOUT: u64 = 10000;
 
-fn list_credentials(manager: &mut AuthenticatorService) {
-    let (status_tx, status_rx) = channel::<StatusUpdate>();
-    thread::spawn(move || {
-        let mut management_request = None;
-        loop {
-            match status_rx.recv() {
-                Ok(StatusUpdate::InteractiveManagement(InteractiveUpdate::StartManagement((request, _)))) => {
-                    management_request = Some(request.clone());
-                    if let Some(sender) = management_request.clone() {
-                        sender.send(CredentialManagement(GetCredentials, None)).unwrap();
-                    }
-                },
-                Ok(StatusUpdate::InteractiveManagement(InteractiveUpdate::CredentialManagementUpdate((result, _)))) => {
-                    println!("{}", result.desc());
-                    if let Some(sender) = management_request.clone() {
-                        sender.send(Quit).unwrap();
-                    }
-                },
-                Ok(StatusUpdate::PinUvError(StatusPinUv::PinRequired(response))) => {
-                    response.send(Pin::new(DEFAULT_PIN)).unwrap();
-                },
-                Err(_) => {
-                    println!("STATUS: END");
-                    return
-                }
-                x => {println!("Unknown Update: {:?}",x)},
-            }
-        }
-    });
-
+fn callback_to_channel<T>() -> (Receiver<T>, StateCallback<T>)
+where
+    T: Send + 'static,
+{
     let (receive_tx, receive_rx) = channel();
     let callback = StateCallback::new(Box::new(move |rv| {
         receive_tx.send(rv).unwrap();
     }));
+    (receive_rx, callback)
+}
+
+fn update_listener(listener: Box<dyn Fn(StatusUpdate) + Send>) -> Sender<StatusUpdate> {
+    let (status_tx, status_rx) = channel::<StatusUpdate>();
+    thread::spawn(move || loop {
+        let status = match status_rx.recv() {
+            Ok(x) => x,
+            Err(_) => return,
+        };
+        listener(status);
+    });
+    status_tx
+}
+
+fn list_credentials(
+    manager: &mut AuthenticatorService,
+    pin: String,
+) -> Result<CredentialList, &str> {
+    let (result_tx, result_rx) = channel::<Result<CredentialList, &str>>();
+    let req = Arc::new(Mutex::new(None));
+    let status_tx = update_listener(Box::new(move |status| match status {
+        InteractiveManagement(interactive) => match interactive {
+            StartManagement((request, _)) => {
+                req.lock().unwrap().replace(request.clone());
+                request
+                    .send(CredentialManagement(GetCredentials, None))
+                    .unwrap();
+            }
+            CredentialManagementUpdate((CredentialManagementResult::CredentialList(list), _)) => {
+                if let Err(e) = result_tx.send(Ok(list)) {
+                    println!("Error sending result: {}", e);
+                }
+                match req.lock().unwrap().deref() {
+                    Some(sender) => sender.send(Quit).unwrap(),
+                    None => {}
+                }
+            }
+            x => println!("Unknown InteractiveManagement: {:?}", x),
+        },
+        PinUvError(err) => match err {
+            StatusPinUv::PinRequired(response) => {
+                response.send(Pin::new(pin.as_str())).unwrap();
+            }
+            StatusPinUv::InvalidPin(_, _) => {
+                result_tx.send(Err("Invalid PIN")).unwrap();
+                return;
+            }
+            x => println!("Unknown PinUvError: {:?}", x),
+        },
+        x => println!("Unknown Update: {:?}", x),
+    }));
+
+    let (receive_rx, callback) = callback_to_channel();
 
     manager.manage(TIMEOUT, status_tx, callback).unwrap();
 
-    receive_rx.recv().expect("List Credentials failed").unwrap();
+    receive_rx
+        .recv()
+        .unwrap()
+        .or(Err("Could not receive result"))?;
+
+    result_rx.recv().unwrap()
 }
 
 fn get_assertion(manager: &mut AuthenticatorService) {
@@ -149,16 +199,9 @@ fn register_credential(manager: &mut AuthenticatorService) {
         use_ctap1_fallback: false,
     };
 
-    let (register_tx, register_rx) = channel();
-    let callback = StateCallback::new(Box::new(move |rv| {
-        register_tx.send(rv).unwrap();
-    }));
-
-    if let Err(e) = manager.register(TIMEOUT, ctap_args, status_tx.clone(), callback) {
-        panic!("Couldn't register: {:?}", e);
-    };
-
-    let result = register_rx
+    let (result_rx, callback) = callback_to_channel();
+    manager.register(TIMEOUT, ctap_args, status_tx.clone(), callback).expect("Could not call register");
+    let result = result_rx
         .recv()
         .expect("Problem receiving, unable to continue")
         .expect("Registration failed");
@@ -193,24 +236,65 @@ fn spawn_status_listener() -> std::sync::mpsc::Sender<StatusUpdate> {
     status_tx
 }
 
-fn set_pin(manager: &mut AuthenticatorService) {
+fn set_pin(manager: &mut AuthenticatorService, pin: String) {
     let status_tx = spawn_status_listener();
     let (register_tx, register_rx) = channel();
     let callback = StateCallback::new(Box::new(move |rv| {
         register_tx.send(rv).unwrap();
     }));
-    manager.set_pin(TIMEOUT, Pin::new(DEFAULT_PIN), status_tx, callback).unwrap();
+    manager
+        .set_pin(TIMEOUT, Pin::new(pin.as_str()), status_tx, callback)
+        .unwrap();
     let result = register_rx.recv().unwrap();
     println!("Set Pin Result: {:?}", result);
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let mut opts = Options::new();
+    opts.optopt(
+        "c",
+        "command",
+        "command to run",
+        "list, set_pin, create, sign",
+    );
+    opts.optopt("", "pin", "PIN for the device", "1234");
+    let matches = opts.parse(&args[1..]).expect("Could not parse options");
+
     let mut manager =
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
+    let mut pin = None;
+    match matches.opt_get::<String>("pin") {
+        Ok(Some(pin_string)) => {
+            pin = Some(pin_string);
+        }
+        _ => {}
+    }
 
-    // get_assertion(&mut manager);
-    list_credentials(&mut manager);
-    // set_pin(&mut manager);
+    match matches.opt_get::<String>("c") {
+        Ok(Some(command)) => match command.as_str() {
+            "list" => match list_credentials(&mut manager, pin.expect("No PIN provided")) {
+                Ok(list) => {
+                    println!("{}", list.desc())
+                }
+                Err(e) => {
+                    println!("Could not list credentials: {}", e)
+                }
+            },
+            "set_pin" => {
+                set_pin(&mut manager, pin.expect("No PIN Provided"));
+            }
+            "create" => {
+                register_credential(&mut manager);
+            }
+            "sign" => {
+                get_assertion(&mut manager);
+            }
+            _ => println!("Unknown command: {}", command),
+        },
+        Ok(None) => println!("No command set"),
+        Err(x) => println!("Error: {}", x),
+    }
 }
