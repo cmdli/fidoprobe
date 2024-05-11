@@ -23,13 +23,10 @@ use getopts::Options;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
 use std::{
-    env,
-    ops::Deref,
-    sync::{
+    env, ops::Deref, sync::{
         mpsc::{channel, Receiver, RecvError, Sender},
         Arc, Mutex,
-    },
-    thread,
+    }, thread
 };
 
 /*
@@ -115,10 +112,9 @@ fn list_credentials(
 
     receive_rx
         .recv()
-        .unwrap()
-        .or(Err("Could not receive result"))?;
+        .unwrap().ok();
 
-    result_rx.recv().unwrap()
+    result_rx.recv().unwrap_or(Err("Unexpectedly quit"))
 }
 
 fn get_assertion(manager: &mut AuthenticatorService) {
@@ -140,24 +136,9 @@ fn get_assertion(manager: &mut AuthenticatorService) {
         use_ctap1_fallback: false,
     };
 
-    let (register_tx, register_rx) = channel();
-    let callback = StateCallback::new(Box::new(move |rv| {
-        register_tx.send(rv).unwrap();
-    }));
-
-    if let Err(e) = manager.sign(TIMEOUT, args, status_tx, callback) {
-        panic!("Error: {}", e);
-    }
-
-    let result;
-    match register_rx.recv().expect("Failed to receive result") {
-        Ok(a) => {
-            result = a;
-        }
-        Err(e) => {
-            panic!("{}", e)
-        }
-    }
+    let (result_rx, callback) = callback_to_channel();
+    manager.sign(TIMEOUT, args, status_tx, callback).unwrap();
+    let result = result_rx.recv().expect("Failed to receive result").unwrap();
     println!("{}", result.desc());
 }
 
@@ -200,7 +181,7 @@ fn register_credential(manager: &mut AuthenticatorService) {
     };
 
     let (result_rx, callback) = callback_to_channel();
-    manager.register(TIMEOUT, ctap_args, status_tx.clone(), callback).expect("Could not call register");
+    manager.register(TIMEOUT, ctap_args, status_tx.clone(), callback).unwrap();
     let result = result_rx
         .recv()
         .expect("Problem receiving, unable to continue")
@@ -238,26 +219,23 @@ fn spawn_status_listener() -> std::sync::mpsc::Sender<StatusUpdate> {
 
 fn set_pin(manager: &mut AuthenticatorService, pin: String) {
     let status_tx = spawn_status_listener();
-    let (register_tx, register_rx) = channel();
-    let callback = StateCallback::new(Box::new(move |rv| {
-        register_tx.send(rv).unwrap();
-    }));
+    let (result_rx, callback) = callback_to_channel();
     manager
         .set_pin(TIMEOUT, Pin::new(pin.as_str()), status_tx, callback)
         .unwrap();
-    let result = register_rx.recv().unwrap();
+    let result = result_rx.recv().unwrap();
     println!("Set Pin Result: {:?}", result);
+}
+
+fn print_usage(program: &str, opts: Options) {
+    let brief = format!("Usage: {program} [OPTIONS] COMMAND");
+    println!("{}", opts.usage(&brief));
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let program = &args[0];
     let mut opts = Options::new();
-    opts.optopt(
-        "c",
-        "command",
-        "command to run",
-        "list, set_pin, create, sign",
-    );
     opts.optopt("", "pin", "PIN for the device", "1234");
     let matches = opts.parse(&args[1..]).expect("Could not parse options");
 
@@ -265,36 +243,44 @@ fn main() {
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
-    let mut pin = None;
-    match matches.opt_get::<String>("pin") {
-        Ok(Some(pin_string)) => {
-            pin = Some(pin_string);
-        }
-        _ => {}
-    }
+    let command = if matches.free.is_empty() {
+        println!("No command specified");
+        print_usage(program, opts);
+        return;
+    } else {
+        matches.free[0].clone()
+    };
 
-    match matches.opt_get::<String>("c") {
-        Ok(Some(command)) => match command.as_str() {
-            "list" => match list_credentials(&mut manager, pin.expect("No PIN provided")) {
-                Ok(list) => {
-                    println!("{}", list.desc())
-                }
-                Err(e) => {
-                    println!("Could not list credentials: {}", e)
-                }
-            },
-            "set_pin" => {
-                set_pin(&mut manager, pin.expect("No PIN Provided"));
+    match command.as_str() {
+        "list" => {
+            let pin = matches.opt_str("pin");
+            if let None = pin {
+                println!("No PIN provided");
+                print_usage(program, opts);
+                return;
             }
-            "create" => {
-                register_credential(&mut manager);
+            let res = list_credentials(&mut manager, pin.unwrap());
+            if let Err(e) = res {
+                println!("Could not list crednetials: {}", e);
+            } else {
+                println!("{}", res.unwrap().desc())
             }
-            "sign" => {
-                get_assertion(&mut manager);
-            }
-            _ => println!("Unknown command: {}", command),
         },
-        Ok(None) => println!("No command set"),
-        Err(x) => println!("Error: {}", x),
+        "set_pin" => {
+            let pin = matches.opt_str("pin");
+            if let None = pin {
+                println!("No PIN provided");
+                print_usage(program, opts);
+                return;
+            }
+            set_pin(&mut manager, pin.unwrap());
+        }
+        "create" => {
+            register_credential(&mut manager);
+        }
+        "sign" => {
+            get_assertion(&mut manager);
+        }
+        _ => println!("Unknown command: {}", command),
     }
 }
