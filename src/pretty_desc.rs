@@ -8,15 +8,24 @@ use authenticator::{
         commands::credential_management::{
             CredentialList, CredentialListEntry, CredentialRpListEntry,
         },
-        server::{CredentialProtectionPolicy, PublicKeyCredentialDescriptor, PublicKeyCredentialUserEntity, RelyingParty},
+        server::{
+            CredentialProtectionPolicy, PublicKeyCredentialDescriptor,
+            PublicKeyCredentialUserEntity, RelyingParty,
+        },
     },
     Assertion, AttestationObject, CredentialManagementResult, GetAssertionResult,
     MakeCredentialsResult,
 };
-use base64::Engine;
 
-fn base64_encode<T: AsRef<[u8]>>(v: T) -> String {
-    base64::engine::general_purpose::STANDARD.encode(v)
+use crate::util::base64_encode;
+
+fn abbreviate(id: &String, before: usize, after: usize) -> String {
+    if id.len() <= before + 3 + after {
+        return id.clone();
+    }
+    let first = &id[..=before];
+    let second = &id[id.len() - after..id.len()];
+    return first.to_string() + "..." + second;
 }
 
 pub trait PrettyDesc {
@@ -209,17 +218,21 @@ fn credential_protection_policy(val: u64) -> Option<CredentialProtectionPolicy> 
 impl PrettyDescImpl for CredentialListEntry {
     fn desc_lines(&self) -> Vec<String> {
         let mut lines = vec![];
-        lines.push(format!("Credential (ID: \"{}\"):", base64_encode(&self.credential_id.id)));
-        // lines.push(format!("    User ID: \"{}\"", base64_encode(&self.user.id)));
-        // if let Some(name) = &self.user.name {
-        //     lines.push(format!("    User Name: \"{}\"", name));
-        // }
-        lines.extend(self.user.child_desc());
+        lines.push(format!(
+            "Credential {}:",
+            abbreviate(&base64_encode(&self.credential_id.id), 5, 5)
+        ));
+        lines.push(format!("    User ID: {}", base64_encode(&self.user.id)));
+        if let Some(name) = &self.user.name {
+            lines.push(format!("    User Name: \"{}\"", name));
+        }
+        // lines.extend(self.user.child_desc());
+        lines.push(format!(
+            "    Public key: {}",
+            abbreviate(&base64_encode(self.public_key.der_spki().unwrap()), 10, 10)
+        ));
         if let Some(policy) = credential_protection_policy(self.cred_protect) {
-            lines.push(format!(
-                "    Credential Protection Policy: {:?}",
-                policy
-            ));
+            lines.push(format!("    Credential Protection Policy: {:?}", policy));
         }
         if let Some(key) = &self.large_blob_key {
             lines.push(format!("    Large Blob Key: {:?}", key));
@@ -232,9 +245,9 @@ impl PrettyDescImpl for CredentialRpListEntry {
     fn desc_lines(&self) -> Vec<String> {
         let mut lines = vec![];
         if let Some(name) = &self.rp.name {
-            lines.push(format!("RelyingParty (\"{}\", \"{}\"):",self.rp.id, name));
+            lines.push(format!("RelyingParty (\"{}\", \"{}\"):", self.rp.id, name));
         } else {
-            lines.push(format!("RelyingParty (\"{}\"):",self.rp.id));
+            lines.push(format!("Relying Party \"{}\":", self.rp.id));
         }
         for cred in self.credentials.iter() {
             lines.extend(cred.child_desc());
@@ -254,6 +267,7 @@ impl PrettyDescImpl for CredentialList {
         ));
         for credential in self.credential_list.iter() {
             lines.extend(credential.desc_lines());
+            lines.push("".to_string());
         }
         lines
     }
