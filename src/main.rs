@@ -1,3 +1,5 @@
+mod custom_clone;
+mod manage_session;
 mod pretty_desc;
 mod util;
 
@@ -13,27 +15,18 @@ use authenticator::{
         },
     },
     statecallback::StateCallback,
-    CredManagementCmd::GetCredentials,
-    CredentialManagementResult,
-    InteractiveRequest::{CredentialManagement, Quit},
-    InteractiveUpdate::{CredentialManagementUpdate, StartManagement},
-    Pin, StatusPinUv,
-    StatusUpdate::{self, InteractiveManagement, PinUvError},
+    AuthenticatorInfo, Pin, StatusUpdate,
 };
 use getopts::Options;
+use manage_session::ManageSession;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
 use std::{
     env,
-    ops::Deref,
     process::exit,
-    sync::{
-        mpsc::{channel, Receiver, RecvError, Sender},
-        Arc, Mutex,
-    },
+    sync::mpsc::{channel, Receiver, RecvError},
     thread,
 };
-use util::base64_encode;
 
 /*
 Usages:
@@ -62,80 +55,26 @@ where
     (receive_rx, callback)
 }
 
-fn update_listener(listener: Box<dyn Fn(StatusUpdate) + Send>) -> Sender<StatusUpdate> {
-    let (status_tx, status_rx) = channel::<StatusUpdate>();
-    thread::spawn(move || loop {
-        let status = match status_rx.recv() {
-            Ok(x) => x,
-            Err(_) => return,
-        };
-        listener(status);
-    });
-    status_tx
-}
-
-fn list_credentials<'a>(
-    manager: &'a mut AuthenticatorService,
-    pin: String,
-) -> Result<CredentialList, &str> {
-    let (result_tx, result_rx) = channel::<Result<CredentialList, &str>>();
-    let req = Arc::new(Mutex::new(None));
-    let status_tx = update_listener(Box::new(move |status| match status {
-        InteractiveManagement(interactive) => match interactive {
-            StartManagement((request, _)) => {
-                req.lock().unwrap().replace(request.clone());
-                request
-                    .send(CredentialManagement(GetCredentials, None))
-                    .unwrap();
-            }
-            CredentialManagementUpdate((CredentialManagementResult::CredentialList(list), _)) => {
-                if let Err(e) = result_tx.send(Ok(list)) {
-                    println!("Error sending result: {}", e);
-                }
-                match req.lock().unwrap().deref() {
-                    Some(sender) => sender.send(Quit).unwrap(),
-                    None => {}
-                }
-            }
-            x => println!("Unknown InteractiveManagement: {:?}", x),
-        },
-        PinUvError(err) => match err {
-            StatusPinUv::PinRequired(response) => {
-                response.send(Pin::new(pin.as_str())).unwrap();
-            }
-            StatusPinUv::InvalidPin(_, _) => {
-                result_tx.send(Err("Invalid PIN")).unwrap();
-                return;
-            }
-            x => println!("Unknown PinUvError: {:?}", x),
-        },
-        x => println!("Unknown Update: {:?}", x),
-    }));
-
-    let (receive_rx, callback) = callback_to_channel();
-
-    manager.manage(TIMEOUT, status_tx, callback).unwrap();
-
-    receive_rx.recv().unwrap().ok();
-
-    result_rx.recv().unwrap_or(Err("Unexpectedly quit"))
-}
-
-fn b64_starts_with(v: &Vec<u8>, prefix: &String) -> bool {
-    base64_encode(v).starts_with(prefix)
+fn list_credentials(pin: String) -> Result<(CredentialList, Option<AuthenticatorInfo>), String> {
+    let mut session = ManageSession::new(pin);
+    let credentials = session.list_credentials()?;
+    let info = session.auth_info();
+    Ok((credentials, info))
 }
 
 fn get_credential(
-    manager: &mut AuthenticatorService,
     pin: String,
     prefix: String,
-) -> Result<CredentialListEntry, &str> {
-    list_credentials(manager, pin)?
-        .credential_list
-        .into_iter()
-        .flat_map(|entry| entry.credentials.into_iter())
-        .find(|cred| b64_starts_with(&cred.credential_id.id, &prefix))
-        .ok_or("Could not find credential")
+) -> Result<(CredentialListEntry, RelyingParty), String> {
+    let mut session = ManageSession::new(pin);
+    let res = session.get_credential(prefix);
+    res
+}
+
+fn delete_credential(pin: String, prefix: String) -> Result<Option<AuthenticatorInfo>, String> {
+    let mut session = ManageSession::new(pin);
+    session.delete_credential(prefix)?;
+    Ok(session.auth_info())
 }
 
 fn get_assertion(manager: &mut AuthenticatorService) {
@@ -278,14 +217,6 @@ fn main() {
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
-    let command = if matches.free.is_empty() {
-        println!("No command specified");
-        print_usage(program, &opts);
-        return;
-    } else {
-        matches.free[0].clone()
-    };
-
     let get_opt = |name: &str| {
         let val = &matches.opt_str(name);
         if let None = val {
@@ -296,14 +227,31 @@ fn main() {
         val.clone().unwrap()
     };
 
+    let get_free_arg = |i: usize, err_msg: &str| {
+        if (&matches).free.len() <= i {
+            println!("{}", err_msg);
+            print_usage(program, &opts);
+            exit(1);
+        }
+        (&matches).free[i].clone()
+    };
+
+    let command = get_free_arg(0, "No command specified");
+
     match command.as_str() {
         "list" => {
             let pin = get_opt("pin");
-            let res = list_credentials(&mut manager, pin);
-            if let Err(e) = res {
-                println!("Could not list credentials: {}", e);
-            } else {
-                println!("{}", res.unwrap().desc())
+            let res = list_credentials(pin);
+            match res {
+                Err(e) => {
+                    println!("Could not list credentials: {}", e);
+                }
+                Ok((list, info)) => {
+                    if let Some(info) = info {
+                        println!("Authenticator: {:?}", info.aaguid);
+                    }
+                    println!("{}", list.desc());
+                }
             }
         }
         "set_pin" => {
@@ -312,12 +260,26 @@ fn main() {
         }
         "info" => {
             let pin = get_opt("pin");
-            let prefix = get_opt("id");
-            let cred = get_credential(&mut manager, pin, prefix);
-            if let Err(e) = cred {
-                println!("{}", e);
-            } else {
-                println!("{}", cred.unwrap().desc());
+            let prefix = get_free_arg(1, "No ID specified");
+            let cred = get_credential(pin, prefix);
+            match cred {
+                Ok((cred, rp)) => println!("{}\n{}", rp.desc(), cred.desc()),
+                Err(e) => println!("{}", e),
+            }
+        }
+        "delete" => {
+            let pin = get_opt("pin");
+            let prefix = get_free_arg(1, "No ID specified");
+            match delete_credential(pin, prefix) {
+                Ok(info) => {
+                    if let Some(info) = info {
+                        println!("Authenticator: {:?}", info.aaguid);
+                    }
+                    println!("Success");
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                }
             }
         }
         "create" => {

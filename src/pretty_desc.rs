@@ -13,20 +13,11 @@ use authenticator::{
             PublicKeyCredentialUserEntity, RelyingParty,
         },
     },
-    Assertion, AttestationObject, CredentialManagementResult, GetAssertionResult,
-    MakeCredentialsResult,
+    Assertion, AttestationObject, AuthenticatorInfo, CredentialManagementResult,
+    GetAssertionResult, MakeCredentialsResult,
 };
 
-use crate::util::base64_encode;
-
-fn abbreviate(id: &String, before: usize, after: usize) -> String {
-    if id.len() <= before + 3 + after {
-        return id.clone();
-    }
-    let first = &id[..=before];
-    let second = &id[id.len() - after..id.len()];
-    return first.to_string() + "..." + second;
-}
+use crate::util::{abbreviate, base64_encode, display_option};
 
 pub trait PrettyDesc {
     fn desc(&self) -> String;
@@ -199,10 +190,12 @@ impl PrettyDescImpl for GetAssertionResult {
 
 impl PrettyDescImpl for RelyingParty {
     fn desc_lines(&self) -> Vec<String> {
-        vec![format!(
-            "RelyingParty - (ID: \"{}\", Name: \"{:?}\")",
-            self.id, self.name
-        )]
+        let mut lines = vec![format!("RelyingParty:")];
+        lines.push(format!("    ID: \"{}\"", self.id));
+        if let Some(name) = &self.name {
+            lines.push(format!("    Name: \"{}\"", name));
+        }
+        lines
     }
 }
 
@@ -218,19 +211,10 @@ fn credential_protection_policy(val: u64) -> Option<CredentialProtectionPolicy> 
 impl PrettyDescImpl for CredentialListEntry {
     fn desc_lines(&self) -> Vec<String> {
         let mut lines = vec![];
-        lines.push(format!(
-            "Credential {}:",
-            abbreviate(&base64_encode(&self.credential_id.id), 5, 5)
-        ));
-        lines.push(format!("    User ID: {}", base64_encode(&self.user.id)));
-        if let Some(name) = &self.user.name {
-            lines.push(format!("    User Name: \"{}\"", name));
-        }
-        // lines.extend(self.user.child_desc());
-        lines.push(format!(
-            "    Public key: {}",
-            abbreviate(&base64_encode(self.public_key.der_spki().unwrap()), 10, 10)
-        ));
+        lines.push(format!("Credential:",));
+        lines.extend(self.credential_id.child_desc());
+        lines.extend(self.user.child_desc());
+        lines.extend(self.public_key.child_desc());
         if let Some(policy) = credential_protection_policy(self.cred_protect) {
             lines.push(format!("    Credential Protection Policy: {:?}", policy));
         }
@@ -249,8 +233,28 @@ impl PrettyDescImpl for CredentialRpListEntry {
         } else {
             lines.push(format!("Relying Party \"{}\":", self.rp.id));
         }
+        // Abbreviate the credentials
         for cred in self.credentials.iter() {
-            lines.extend(cred.child_desc());
+            let mut child_lines = vec![];
+            child_lines.push(format!(
+                "Credential {}:",
+                abbreviate(&base64_encode(&cred.credential_id.id), 5, 5)
+            ));
+            child_lines.push(format!("    User ID: {}", base64_encode(&cred.user.id)));
+            if let Some(name) = &cred.user.name {
+                child_lines.push(format!("    User Name: \"{}\"", name));
+            }
+            child_lines.push(format!(
+                "    Public key: {}",
+                abbreviate(&base64_encode(cred.public_key.der_spki().unwrap()), 10, 10)
+            ));
+            if let Some(policy) = credential_protection_policy(cred.cred_protect) {
+                child_lines.push(format!("    Credential Protection Policy: {:?}", policy));
+            }
+            if let Some(key) = &cred.large_blob_key {
+                child_lines.push(format!("    Large Blob Key: {:?}", key));
+            }
+            lines.extend(child_lines.iter().map(|x| "    ".to_string() + x));
         }
         lines
     }
@@ -267,7 +271,6 @@ impl PrettyDescImpl for CredentialList {
         ));
         for credential in self.credential_list.iter() {
             lines.extend(credential.desc_lines());
-            lines.push("".to_string());
         }
         lines
     }
@@ -279,5 +282,21 @@ impl PrettyDescImpl for CredentialManagementResult {
             CredentialManagementResult::CredentialList(list) => list.desc_lines(),
             x => vec![format!("{:?}", x)],
         }
+    }
+}
+
+impl PrettyDescImpl for AuthenticatorInfo {
+    fn desc_lines(&self) -> Vec<String> {
+        let mut lines = vec![];
+        lines.push(format!("Authenticator:"));
+        lines.push(format!("    Versions: {:?}", self.versions));
+        lines.push(format!("    Extensions: {:?}", self.extensions));
+        lines.push(format!("    AAGUID: {:?}", self.aaguid));
+        lines.push(format!("    Options: {:?}", self.options));
+        lines.push(format!(
+            "    Max Message Size: {:?}",
+            display_option(self.max_msg_size)
+        ));
+        lines
     }
 }
