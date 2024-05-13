@@ -1,3 +1,4 @@
+use crate::listen_loop::{ListenLoop, Listener};
 use crate::util::b64_starts_with;
 use crate::TIMEOUT;
 use crate::{custom_clone::CustomClone, util::SetOnce};
@@ -9,15 +10,10 @@ use authenticator::{
     AuthenticatorInfo, CredManagementCmd, CredentialManagementResult, InteractiveRequest,
     InteractiveUpdate, Pin, StatusPinUv, StatusUpdate,
 };
-use std::{
-    sync::{
-        mpsc::{channel, Sender},
-        Arc, Mutex,
-    },
-    thread,
+use std::sync::{
+    mpsc::{channel, Sender},
+    Arc, Mutex,
 };
-
-type UpdateListener = Box<dyn Fn(&StatusUpdate) -> bool + Send>;
 
 struct ManageSessionState {
     management_request: Option<Sender<InteractiveRequest>>,
@@ -26,7 +22,7 @@ struct ManageSessionState {
 }
 
 pub struct ManageSession {
-    listeners: Arc<Mutex<Vec<UpdateListener>>>,
+    listen_loop: ListenLoop<StatusUpdate>,
     manager: Arc<Mutex<AuthenticatorService>>,
     state: Arc<Mutex<ManageSessionState>>,
     done: Arc<SetOnce<bool>>,
@@ -38,7 +34,7 @@ impl ManageSession {
             AuthenticatorService::new().expect("The auth service should initialize safely");
         manager.add_u2f_usb_hid_platform_transports();
         let mut session = ManageSession {
-            listeners: Arc::new(Mutex::new(vec![])),
+            listen_loop: ListenLoop::new(),
             manager: Arc::new(Mutex::new(manager)),
             done: Arc::new(SetOnce::new()),
             state: Arc::new(Mutex::new(ManageSessionState {
@@ -48,8 +44,23 @@ impl ManageSession {
             })),
         };
         session.add_pin_listener(pin);
+        session.add_status_listener();
         session.start();
         session
+    }
+
+    fn add_status_listener(&mut self) {
+        self.add_listener(Box::new(move |update| match update {
+            StatusUpdate::SelectDeviceNotice => {
+                println!("Multiple devices detected, please select a device by confirming on the desired device...");
+                false
+            },
+            StatusUpdate::PresenceRequired => {
+                println!("Requires presence verification, please confirm on the desired device...");
+                false
+            }
+            _ => false,
+        }));
     }
 
     fn add_pin_listener(&mut self, pin: String) {
@@ -68,6 +79,7 @@ impl ManageSession {
                         .replace("Invalid PIN".to_string());
                     true
                 }
+                // TODO: Handle the PIN error messages
                 x => {
                     println!("Unknown PIN update: {:?}", x);
                     false
@@ -77,33 +89,8 @@ impl ManageSession {
         }));
     }
 
-    fn start_update_listen(&self) -> Sender<StatusUpdate> {
-        let (status_tx, status_rx) = channel::<StatusUpdate>();
-        let listeners = self.listeners.clone();
-        thread::spawn(move || loop {
-            let status = match status_rx.recv() {
-                Ok(x) => x,
-                Err(_) => return,
-            };
-            let mut old_listeners = listeners.lock().unwrap();
-            let mut new_listeners = vec![];
-            while !old_listeners.is_empty() {
-                match old_listeners.pop() {
-                    Some(listener) => {
-                        if !listener(&status) {
-                            new_listeners.push(listener);
-                        }
-                    }
-                    None => {}
-                }
-            }
-            old_listeners.extend(new_listeners);
-        });
-        status_tx
-    }
-
-    fn add_listener(&mut self, listener: UpdateListener) {
-        self.listeners.lock().unwrap().push(listener);
+    fn add_listener(&mut self, listener: Listener<StatusUpdate>) {
+        self.listen_loop.add_listener(listener);
     }
 
     fn send_command(&mut self, cmd: InteractiveRequest) {
@@ -139,7 +126,6 @@ impl ManageSession {
             }
             _ => false,
         }));
-        let status_tx = self.start_update_listen();
         let done = self.done.clone();
         let callback = StateCallback::new(Box::new(move |_| {
             done.set(true);
@@ -147,7 +133,7 @@ impl ManageSession {
         self.manager
             .lock()
             .unwrap()
-            .manage(TIMEOUT, status_tx, callback)
+            .manage(TIMEOUT, self.listen_loop.sender(), callback)
             .unwrap();
         done_rx.recv().unwrap();
     }
