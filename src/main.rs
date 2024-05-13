@@ -2,6 +2,7 @@ mod custom_clone;
 mod listen_loop;
 mod manage_session;
 mod pretty_desc;
+mod status_listeners;
 mod util;
 
 use authenticator::{
@@ -19,14 +20,15 @@ use authenticator::{
     AuthenticatorInfo, Pin, StatusUpdate,
 };
 use getopts::Options;
+use listen_loop::ListenLoop;
 use manage_session::ManageSession;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
+use status_listeners::{panic_on_pin_error, prompt_for_presence};
 use std::{
     env,
     process::exit,
-    sync::mpsc::{channel, Receiver, RecvError},
-    thread,
+    sync::mpsc::{channel, Receiver},
 };
 
 /*
@@ -79,7 +81,7 @@ fn delete_credential(pin: String, prefix: String) -> Result<Option<Authenticator
 }
 
 fn get_assertion(manager: &mut AuthenticatorService) {
-    let status_tx = spawn_status_listener();
+    let listen_loop = default_listen_loop();
     let args = SignArgs {
         client_data_hash: (0..=31)
             .collect::<Vec<u8>>()
@@ -96,15 +98,16 @@ fn get_assertion(manager: &mut AuthenticatorService) {
         pin: None,
         use_ctap1_fallback: false,
     };
-
     let (result_rx, callback) = callback_to_channel();
-    manager.sign(TIMEOUT, args, status_tx, callback).unwrap();
+    manager
+        .sign(TIMEOUT, args, listen_loop.sender(), callback)
+        .unwrap();
     let result = result_rx.recv().expect("Failed to receive result").unwrap();
     println!("{}", result.desc());
 }
 
 fn register_credential(manager: &mut AuthenticatorService) {
-    let status_tx = spawn_status_listener();
+    let listen_loop = default_listen_loop();
 
     let mut chall_bytes = [0u8; 32];
     thread_rng().fill_bytes(&mut chall_bytes);
@@ -143,7 +146,7 @@ fn register_credential(manager: &mut AuthenticatorService) {
 
     let (result_rx, callback) = callback_to_channel();
     manager
-        .register(TIMEOUT, ctap_args, status_tx.clone(), callback)
+        .register(TIMEOUT, ctap_args, listen_loop.sender(), callback)
         .unwrap();
     let result = result_rx
         .recv()
@@ -152,39 +155,23 @@ fn register_credential(manager: &mut AuthenticatorService) {
     println!("{}", result.desc());
 }
 
-fn spawn_status_listener() -> std::sync::mpsc::Sender<StatusUpdate> {
-    let (status_tx, status_rx) = channel::<StatusUpdate>();
-    thread::spawn(move || loop {
-        match status_rx.recv() {
-            Ok(StatusUpdate::InteractiveManagement(..)) => {
-                panic!("STATUS: This can't happen when doing non-interactive usage");
-            }
-            Ok(StatusUpdate::SelectDeviceNotice) => {
-                println!("STATUS: Please select a device by touching one of them.");
-            }
-            Ok(StatusUpdate::PresenceRequired) => {
-                println!("STATUS: waiting for user presence");
-            }
-            Ok(StatusUpdate::PinUvError(e)) => {
-                panic!("Unexpected error: {:?}", e)
-            }
-            Ok(StatusUpdate::SelectResultNotice(_, _)) => {
-                panic!("Unexpected select device notice")
-            }
-            Err(RecvError) => {
-                println!("STATUS: end");
-                return;
-            }
-        }
-    });
-    status_tx
+fn default_listen_loop() -> ListenLoop<StatusUpdate> {
+    let mut listen_loop = ListenLoop::new();
+    listen_loop.add_listener(panic_on_pin_error());
+    listen_loop.add_listener(prompt_for_presence());
+    listen_loop
 }
 
 fn set_pin(manager: &mut AuthenticatorService, pin: String) {
-    let status_tx = spawn_status_listener();
+    let listen_loop = default_listen_loop();
     let (result_rx, callback) = callback_to_channel();
     manager
-        .set_pin(TIMEOUT, Pin::new(pin.as_str()), status_tx, callback)
+        .set_pin(
+            TIMEOUT,
+            Pin::new(pin.as_str()),
+            listen_loop.sender(),
+            callback,
+        )
         .unwrap();
     let result = result_rx.recv().unwrap();
     println!("Set Pin Result: {:?}", result);

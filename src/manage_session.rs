@@ -1,4 +1,5 @@
 use crate::listen_loop::{ListenLoop, Listener};
+use crate::status_listeners::{login_with_pin, prompt_for_presence};
 use crate::util::b64_starts_with;
 use crate::TIMEOUT;
 use crate::{custom_clone::CustomClone, util::SetOnce};
@@ -8,7 +9,7 @@ use authenticator::{
     ctap2::commands::credential_management::{CredentialList, CredentialListEntry},
     statecallback::StateCallback,
     AuthenticatorInfo, CredManagementCmd, CredentialManagementResult, InteractiveRequest,
-    InteractiveUpdate, Pin, StatusPinUv, StatusUpdate,
+    InteractiveUpdate, StatusUpdate,
 };
 use std::sync::{
     mpsc::{channel, Sender},
@@ -18,7 +19,6 @@ use std::sync::{
 struct ManageSessionState {
     management_request: Option<Sender<InteractiveRequest>>,
     info: Option<AuthenticatorInfo>,
-    error: Option<String>,
 }
 
 pub struct ManageSession {
@@ -40,53 +40,12 @@ impl ManageSession {
             state: Arc::new(Mutex::new(ManageSessionState {
                 management_request: None,
                 info: None,
-                error: None,
             })),
         };
-        session.add_pin_listener(pin);
-        session.add_status_listener();
+        session.add_listener(login_with_pin(pin));
+        session.add_listener(prompt_for_presence());
         session.start();
         session
-    }
-
-    fn add_status_listener(&mut self) {
-        self.add_listener(Box::new(move |update| match update {
-            StatusUpdate::SelectDeviceNotice => {
-                println!("Multiple devices detected, please select a device by confirming on the desired device...");
-                false
-            },
-            StatusUpdate::PresenceRequired => {
-                println!("Requires presence verification, please confirm on the desired device...");
-                false
-            }
-            _ => false,
-        }));
-    }
-
-    fn add_pin_listener(&mut self, pin: String) {
-        let state = self.state.clone();
-        self.add_listener(Box::new(move |update| match update {
-            StatusUpdate::PinUvError(err) => match err {
-                StatusPinUv::PinRequired(response) => {
-                    response.send(Pin::new(pin.as_str())).unwrap();
-                    false
-                }
-                StatusPinUv::InvalidPin(_, _) => {
-                    state
-                        .lock()
-                        .unwrap()
-                        .error
-                        .replace("Invalid PIN".to_string());
-                    true
-                }
-                // TODO: Handle the PIN error messages
-                x => {
-                    println!("Unknown PIN update: {:?}", x);
-                    false
-                }
-            },
-            _ => false,
-        }));
     }
 
     fn add_listener(&mut self, listener: Listener<StatusUpdate>) {
