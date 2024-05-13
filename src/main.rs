@@ -21,11 +21,9 @@ use listen_loop::ListenLoop;
 use manage_session::ManageSession;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
-use status_listeners::{capture_pin_error, prompt_for_presence};
+use status_listeners::{capture_pin_error, login_with_pin, prompt_for_presence};
 use std::{
-    env,
-    process::exit,
-    sync::mpsc::{channel, Receiver},
+    env, io::{stdin, stdout, Write}, process::exit, sync::mpsc::{channel, Receiver}
 };
 
 /*
@@ -39,10 +37,19 @@ Requirements:
 */
 static USERNAME: &str = "username";
 static USER_ID: &str = "userid";
-static RP_NAME: &str = "Example";
-static ORIGIN: &str = "https://example.com";
+static RP_NAME: &str = "webauthn.io";
+static ORIGIN: &str = "https://webauthn.io";
 
 static TIMEOUT: u64 = 10000;
+
+fn prompt(msg: &str) -> Result<String, std::io::Error> {
+    println!("{}", msg);
+    print!("--> ");
+    stdout().flush()?;
+    let mut line = String::new();
+    stdin().read_line(&mut line)?;
+    Ok(line.trim_end().to_string())
+}
 
 fn callback_to_channel<T>() -> (Receiver<T>, StateCallback<T>)
 where
@@ -133,14 +140,13 @@ fn get_assertion() {
     }
 }
 
-fn register_credential() {
+fn register_credential(pin: String) {
     let mut manager =
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
-    let (err_tx, err_rx) = channel();
     let mut listen_loop = ListenLoop::new();
-    listen_loop.add_listener(capture_pin_error(err_tx));
+    listen_loop.add_listener(login_with_pin(pin));
     listen_loop.add_listener(prompt_for_presence());
 
     let mut chall_bytes = [0u8; 32];
@@ -190,11 +196,7 @@ fn register_credential() {
             println!("{}", result.desc());
         }
         Err(x) => {
-            if let Ok(err_msg) = err_rx.try_recv() {
-                println!("Error: {}", err_msg);
-            } else {
-                println!("Unexpected error: {}", x);
-            }
+            println!("Unexpected error: {}", x);
         }
     }
 }
@@ -215,6 +217,34 @@ fn set_pin(pin: String) {
             callback,
         )
         .unwrap();
+    let result = result_rx.recv().unwrap();
+    match result {
+        Ok(()) => println!("Success"),
+        Err(err) => {
+            println!("Error: {}", err)
+        }
+    }
+}
+
+fn reset() {
+    match prompt("Reset the authenticator (Y/n)?") {
+        Ok(answer) => {
+            if answer.to_lowercase() != "y" {
+                return;
+            }
+        }
+        Err(err) => {
+            println!("Could not read response: {}", err);
+            return;
+        }
+    }
+    let mut manager =
+        AuthenticatorService::new().expect("The auth service should initialize safely");
+    manager.add_u2f_usb_hid_platform_transports();
+    let mut listen_loop = ListenLoop::new();
+    listen_loop.add_listener(prompt_for_presence());
+    let (result_rx, callback) = callback_to_channel();
+    manager.reset(TIMEOUT, listen_loop.sender(), callback).unwrap();
     let result = result_rx.recv().unwrap();
     match result {
         Ok(()) => println!("Success"),
@@ -289,10 +319,14 @@ fn main() {
             delete_credential(pin, prefix);
         }
         "create" => {
-            register_credential();
+            let pin = get_opt("pin");
+            register_credential(pin);
         }
         "sign" => {
             get_assertion();
+        }
+        "reset" => {
+            reset();
         }
         _ => println!("Unknown command: {}", command),
     }
