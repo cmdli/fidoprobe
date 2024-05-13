@@ -58,10 +58,6 @@ impl ManageSession {
         sender.send(cmd).unwrap();
     }
 
-    fn send_management_command(&mut self, cmd: CredManagementCmd) {
-        self.send_command(InteractiveRequest::CredentialManagement(cmd, None))
-    }
-
     pub fn auth_info(&self) -> Option<AuthenticatorInfo> {
         let state = self.state.lock().unwrap();
         state.info.clone()
@@ -97,10 +93,6 @@ impl ManageSession {
         done_rx.recv().unwrap();
     }
 
-    pub fn wait(&self) {
-        self.done.get();
-    }
-
     pub fn list_credentials(&mut self) -> Result<CredentialList, String> {
         let (result_tx, result_rx) = channel();
         self.add_listener(Box::new(move |update| match update {
@@ -113,7 +105,10 @@ impl ManageSession {
             }
             _ => false,
         }));
-        self.send_management_command(CredManagementCmd::GetCredentials);
+        self.send_command(InteractiveRequest::CredentialManagement(
+            CredManagementCmd::GetCredentials,
+            None,
+        ));
         result_rx.recv().unwrap()
     }
 
@@ -144,9 +139,8 @@ impl ManageSession {
             }
             _ => false,
         }));
-        self.send_management_command(CredManagementCmd::DeleteCredential(
-            credential.credential_id.clone(),
-        ));
+        let command = CredManagementCmd::DeleteCredential(credential.credential_id.clone());
+        self.send_command(InteractiveRequest::CredentialManagement(command, None));
         result_rx.recv().unwrap()
     }
 }
@@ -154,6 +148,6 @@ impl ManageSession {
 impl Drop for ManageSession {
     fn drop(&mut self) {
         self.send_command(InteractiveRequest::Quit);
-        self.wait();
+        self.done.get();
     }
 }

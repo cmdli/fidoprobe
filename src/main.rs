@@ -8,23 +8,20 @@ mod util;
 use authenticator::{
     authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
     crypto::COSEAlgorithm,
-    ctap2::{
-        commands::credential_management::{CredentialList, CredentialListEntry},
-        server::{
-            AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters,
-            PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement,
-            UserVerificationRequirement,
-        },
+    ctap2::server::{
+        AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters,
+        PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement,
+        UserVerificationRequirement,
     },
     statecallback::StateCallback,
-    AuthenticatorInfo, Pin, StatusUpdate,
+    Pin,
 };
 use getopts::Options;
 use listen_loop::ListenLoop;
 use manage_session::ManageSession;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
-use status_listeners::{panic_on_pin_error, prompt_for_presence};
+use status_listeners::{capture_pin_error, prompt_for_presence};
 use std::{
     env,
     process::exit,
@@ -58,30 +55,51 @@ where
     (receive_rx, callback)
 }
 
-fn list_credentials(pin: String) -> Result<(CredentialList, Option<AuthenticatorInfo>), String> {
+fn list_credentials(pin: String) {
     let mut session = ManageSession::new(pin);
-    let credentials = session.list_credentials()?;
-    let info = session.auth_info();
-    Ok((credentials, info))
+    let credentials = match session.list_credentials() {
+        Ok(list) => list,
+        Err(err) => {
+            println!("Error: {}", err);
+            return;
+        }
+    };
+    if let Some(info) = session.auth_info() {
+        println!("Authenticator: {:?}", info.aaguid);
+    }
+    println!("{}", credentials.desc());
 }
 
-fn get_credential(
-    pin: String,
-    prefix: String,
-) -> Result<(CredentialListEntry, RelyingParty), String> {
+fn get_credential(pin: String, prefix: String) {
     let mut session = ManageSession::new(pin);
     let res = session.get_credential(prefix);
-    res
+    match res {
+        Ok((cred, rp)) => println!("{}\n{}", rp.desc(), cred.desc()),
+        Err(e) => println!("{}", e),
+    }
 }
 
-fn delete_credential(pin: String, prefix: String) -> Result<Option<AuthenticatorInfo>, String> {
+fn delete_credential(pin: String, prefix: String) {
     let mut session = ManageSession::new(pin);
-    session.delete_credential(prefix)?;
-    Ok(session.auth_info())
+    if let Err(err) = session.delete_credential(prefix) {
+        println!("Error: {}", err);
+        return;
+    }
+    if let Some(info) = session.auth_info() {
+        println!("Authenticator: {:?}", info.aaguid);
+    }
+    println!("Success");
 }
 
-fn get_assertion(manager: &mut AuthenticatorService) {
-    let listen_loop = default_listen_loop();
+fn get_assertion() {
+    let mut manager =
+        AuthenticatorService::new().expect("The auth service should initialize safely");
+    manager.add_u2f_usb_hid_platform_transports();
+
+    let (err_tx, err_rx) = channel();
+    let mut listen_loop = ListenLoop::new();
+    listen_loop.add_listener(capture_pin_error(err_tx));
+    listen_loop.add_listener(prompt_for_presence());
     let args = SignArgs {
         client_data_hash: (0..=31)
             .collect::<Vec<u8>>()
@@ -102,12 +120,28 @@ fn get_assertion(manager: &mut AuthenticatorService) {
     manager
         .sign(TIMEOUT, args, listen_loop.sender(), callback)
         .unwrap();
-    let result = result_rx.recv().expect("Failed to receive result").unwrap();
-    println!("{}", result.desc());
+    let result = result_rx.recv().expect("Failed to receive result");
+    match result {
+        Ok(result) => println!("{}", result.desc()),
+        Err(err) => {
+            if let Ok(err) = err_rx.try_recv() {
+                println!("Error: {}", err);
+            } else {
+                println!("Error: {}", err);
+            }
+        }
+    }
 }
 
-fn register_credential(manager: &mut AuthenticatorService) {
-    let listen_loop = default_listen_loop();
+fn register_credential() {
+    let mut manager =
+        AuthenticatorService::new().expect("The auth service should initialize safely");
+    manager.add_u2f_usb_hid_platform_transports();
+
+    let (err_tx, err_rx) = channel();
+    let mut listen_loop = ListenLoop::new();
+    listen_loop.add_listener(capture_pin_error(err_tx));
+    listen_loop.add_listener(prompt_for_presence());
 
     let mut chall_bytes = [0u8; 32];
     thread_rng().fill_bytes(&mut chall_bytes);
@@ -150,20 +184,28 @@ fn register_credential(manager: &mut AuthenticatorService) {
         .unwrap();
     let result = result_rx
         .recv()
-        .expect("Problem receiving, unable to continue")
-        .expect("Registration failed");
-    println!("{}", result.desc());
+        .expect("Problem receiving, unable to continue");
+    match result {
+        Ok(result) => {
+            println!("{}", result.desc());
+        }
+        Err(x) => {
+            if let Ok(err_msg) = err_rx.try_recv() {
+                println!("Error: {}", err_msg);
+            } else {
+                println!("Unexpected error: {}", x);
+            }
+        }
+    }
 }
 
-fn default_listen_loop() -> ListenLoop<StatusUpdate> {
+fn set_pin(pin: String) {
+    let mut manager =
+        AuthenticatorService::new().expect("The auth service should initialize safely");
+    manager.add_u2f_usb_hid_platform_transports();
+
     let mut listen_loop = ListenLoop::new();
-    listen_loop.add_listener(panic_on_pin_error());
     listen_loop.add_listener(prompt_for_presence());
-    listen_loop
-}
-
-fn set_pin(manager: &mut AuthenticatorService, pin: String) {
-    let listen_loop = default_listen_loop();
     let (result_rx, callback) = callback_to_channel();
     manager
         .set_pin(
@@ -174,7 +216,12 @@ fn set_pin(manager: &mut AuthenticatorService, pin: String) {
         )
         .unwrap();
     let result = result_rx.recv().unwrap();
-    println!("Set Pin Result: {:?}", result);
+    match result {
+        Ok(()) => println!("Success"),
+        Err(err) => {
+            println!("Error: {}", err)
+        }
+    }
 }
 
 fn print_usage(program: &str, opts: &Options) {
@@ -201,10 +248,6 @@ fn main() {
         return;
     }
 
-    let mut manager =
-        AuthenticatorService::new().expect("The auth service should initialize safely");
-    manager.add_u2f_usb_hid_platform_transports();
-
     let get_opt = |name: &str| {
         let val = &matches.opt_str(name);
         if let None = val {
@@ -229,52 +272,27 @@ fn main() {
     match command.as_str() {
         "list" => {
             let pin = get_opt("pin");
-            let res = list_credentials(pin);
-            match res {
-                Err(e) => {
-                    println!("Could not list credentials: {}", e);
-                }
-                Ok((list, info)) => {
-                    if let Some(info) = info {
-                        println!("Authenticator: {:?}", info.aaguid);
-                    }
-                    println!("{}", list.desc());
-                }
-            }
+            list_credentials(pin);
         }
         "set_pin" => {
             let pin = get_opt("pin");
-            set_pin(&mut manager, pin);
+            set_pin(pin);
         }
         "info" => {
             let pin = get_opt("pin");
             let prefix = get_free_arg(1, "No ID specified");
-            let cred = get_credential(pin, prefix);
-            match cred {
-                Ok((cred, rp)) => println!("{}\n{}", rp.desc(), cred.desc()),
-                Err(e) => println!("{}", e),
-            }
+            get_credential(pin, prefix);
         }
         "delete" => {
             let pin = get_opt("pin");
             let prefix = get_free_arg(1, "No ID specified");
-            match delete_credential(pin, prefix) {
-                Ok(info) => {
-                    if let Some(info) = info {
-                        println!("Authenticator: {:?}", info.aaguid);
-                    }
-                    println!("Success");
-                }
-                Err(e) => {
-                    println!("Error: {}", e);
-                }
-            }
+            delete_credential(pin, prefix);
         }
         "create" => {
-            register_credential(&mut manager);
+            register_credential();
         }
         "sign" => {
-            get_assertion(&mut manager);
+            get_assertion();
         }
         _ => println!("Unknown command: {}", command),
     }

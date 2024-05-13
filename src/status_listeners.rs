@@ -1,3 +1,5 @@
+use std::sync::mpsc::Sender;
+
 use authenticator::{Pin, StatusPinUv, StatusUpdate};
 
 use crate::listen_loop::Listener;
@@ -16,10 +18,19 @@ pub fn prompt_for_presence() -> Listener<StatusUpdate> {
     })
 }
 
-pub fn panic_on_pin_error() -> Listener<StatusUpdate> {
+pub fn capture_pin_error(err: Sender<String>) -> Listener<StatusUpdate> {
     Box::new(move |update| match update {
-        StatusUpdate::PinUvError(e) => {
-            panic!("Unexpected PIN error: {:?}", e);
+        StatusUpdate::PinUvError(err_status) => {
+            let msg = match err_status {
+                StatusPinUv::PinRequired(_) => "PIN Required".to_string(),
+                StatusPinUv::InvalidPin(..) => "Invalid PIN".to_string(),
+                StatusPinUv::PinBlocked => "PIN Blocked".to_string(),
+                StatusPinUv::PinIsTooLong(size) => format!("PIN is too long, max length {}", size),
+                StatusPinUv::PinIsTooShort => "PIN is too short".to_string(),
+                _ => format!("PIN Error: {:?}", err_status),
+            };
+            err.send(msg).unwrap();
+            true
         }
         _ => false,
     })
