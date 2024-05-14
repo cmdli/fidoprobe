@@ -2,6 +2,13 @@
 name = "fidoprobe"
 version = "0.1.0"
 edition = "2021"
+authors = ["chris@cmdli.dev"]
+readme = "README.md"
+license = "MIT"
+description = "A tool to manage FIDO2 devices"
+homepage = "https://github.com/cmdli/fidoprobe"
+keywords = ["fido", "fido2", "passkey"]
+categories = ["command-line-utilities"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

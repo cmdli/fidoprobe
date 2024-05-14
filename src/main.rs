@@ -16,18 +16,13 @@ use authenticator::{
     statecallback::StateCallback,
     Pin,
 };
-use clap::{Arg, Parser, Subcommand};
-use getopts::Options;
+use clap::{Parser, Subcommand};
 use listen_loop::ListenLoop;
 use manage_session::ManageSession;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
 use status_listeners::{capture_pin_error, prompt_for_pin, prompt_for_presence};
-use std::{
-    env,
-    process::exit,
-    sync::mpsc::{channel, Receiver},
-};
+use std::sync::mpsc::{channel, Receiver};
 use util::prompt;
 
 /*
@@ -39,8 +34,6 @@ Usages:
 Requirements:
     - Pretty print all results
 */
-static USERNAME: &str = "username";
-static USER_ID: &str = "userid";
 static RP_NAME: &str = "webauthn.io";
 static ORIGIN: &str = "https://webauthn.io";
 
@@ -93,7 +86,7 @@ fn delete_credential(prefix: String) {
     println!("Success");
 }
 
-fn get_assertion() {
+fn get_assertion(_id: String) {
     let mut manager =
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
@@ -270,79 +263,91 @@ fn reset() {
     }
 }
 
-fn print_usage(program: &str, opts: &Options) {
-    let brief = format!("Usage: {program} [OPTIONS] COMMAND");
-    println!("{}", opts.usage(&brief));
+#[derive(Parser, Debug)]
+#[command(about = "A utility to interact with FIDO2 devices")]
+struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    #[command(
+        about = "List credentials",
+        long_about = "List credentials for an authenticator"
+    )]
+    List {},
+    #[command(about = "Get info for a particular credential")]
+    Info {
+        #[arg(
+            required = true,
+            help = "ID of the credential in base64 (accepts prefixes, e.g. \"iJ7xQ\")"
+        )]
+        id: String,
+    },
+    #[command(about = "Create a new credential")]
+    Create {
+        #[arg(long, value_name = "ID", help = "ID of the user (e.g. \"aLiCe\")", default_values=vec!["user_id"])]
+        id: String,
+        #[arg(long, help = "Name of the user", default_values=vec!["username"])]
+        name: String,
+        #[arg(
+            long,
+            help = "ID of the relying party (usually a website, e.g. \"webauthn.io\")",
+            default_values = vec!["example.com"]
+        )]
+        rp: String,
+        #[arg(
+            long,
+            help = "Website origin of the relying party (e.g. \"example.com\")",
+            default_values = vec!["example.com"]
+        )]
+        origin: String,
+    },
+    #[command(about = "Delete a credential")]
+    Delete {
+        #[arg(
+            required = true,
+            help = "ID of the credential in base64 (accepts prefixes, e.g. \"iJ7xQ\")"
+        )]
+        id: String,
+    },
+    #[command(about = "Set the PIN on an authenticator")]
+    SetPin {},
+    #[command(about = "Reset an authenticator")]
+    Reset {},
+    #[command(about = "Sign a challenge with a credential")]
+    Sign { id: String },
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let program = &args[0];
-    let mut opts = Options::new();
-    opts.optflag("h", "help", "Display this help message");
-    opts.optopt(
-        "",
-        "id",
-        "ID of the credential (accepts unique prefixes)",
-        "x91m3",
-    );
-    let matches = opts.parse(&args[1..]).expect("Could not parse options");
-
-    if matches.opt_present("h") {
-        print_usage(program, &opts);
-        return;
-    }
-
-    let _get_opt = |name: &str| {
-        let val = &matches.opt_str(name);
-        if let None = val {
-            println!("Option required: {}", name);
-            print_usage(program, &opts);
-            exit(1);
-        }
-        val.clone().unwrap()
-    };
-
-    let get_free_arg = |i: usize, err_msg: &str| {
-        if (&matches).free.len() <= i {
-            println!("{}", err_msg);
-            print_usage(program, &opts);
-            exit(1);
-        }
-        (&matches).free[i].clone()
-    };
-
-    let command = get_free_arg(0, "No command specified");
-
-    match command.as_str() {
-        "list" => {
+    let args = Args::parse();
+    match args.command {
+        Commands::List {} => {
             list_credentials();
         }
-        "set_pin" => {
+        Commands::SetPin {} => {
             set_pin();
         }
-        "info" => {
-            let prefix = get_free_arg(1, "No ID specified");
-            get_credential(prefix);
+        Commands::Info { id } => {
+            get_credential(id);
         }
-        "delete" => {
-            let prefix = get_free_arg(1, "No ID specified");
-            delete_credential(prefix);
+        Commands::Delete { id } => {
+            delete_credential(id);
         }
-        "create" => {
-            register_credential(
-                USER_ID.to_string(),
-                USERNAME.to_string(),
-                RP_NAME.to_string(),
-                ORIGIN.to_string(),
-            );
+        Commands::Create {
+            id,
+            name,
+            rp,
+            origin,
+        } => {
+            register_credential(id, name, rp, origin);
         }
-        "sign" => {
-            get_assertion();
+        Commands::Sign { id } => {
+            get_assertion(id);
         }
-        "reset" => {
+        Commands::Reset {} => {
             reset();
         }
-        _ => println!("Unknown command: {}", command),
     }
 }
