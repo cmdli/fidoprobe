@@ -1,5 +1,5 @@
 use crate::listen_loop::{ListenLoop, Listener};
-use crate::status_listeners::{login_with_pin, prompt_for_presence};
+use crate::status_listeners::{prompt_for_pin, prompt_for_presence};
 use crate::util::b64_starts_with;
 use crate::TIMEOUT;
 use crate::{custom_clone::CustomClone, util::SetOnce};
@@ -29,7 +29,7 @@ pub struct ManageSession {
 }
 
 impl ManageSession {
-    pub fn new(pin: String) -> ManageSession {
+    pub fn new() -> ManageSession {
         let mut manager =
             AuthenticatorService::new().expect("The auth service should initialize safely");
         manager.add_u2f_usb_hid_platform_transports();
@@ -42,7 +42,8 @@ impl ManageSession {
                 info: None,
             })),
         };
-        session.add_listener(login_with_pin(pin));
+        let (err_tx, _) = channel();
+        session.add_listener(prompt_for_pin(err_tx));
         session.add_listener(prompt_for_presence());
         session.start();
         session

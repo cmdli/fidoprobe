@@ -36,7 +36,7 @@ pub fn capture_pin_error(err: Sender<String>) -> Listener<StatusUpdate> {
     })
 }
 
-pub fn login_with_pin(pin: String) -> Listener<StatusUpdate> {
+pub fn _login_with_pin(pin: String) -> Listener<StatusUpdate> {
     // TODO: Handle PIN errors better
     Box::new(move |update| match update {
         StatusUpdate::PinUvError(err) => match err {
@@ -54,6 +54,50 @@ pub fn login_with_pin(pin: String) -> Listener<StatusUpdate> {
                 false
             }
         },
+        _ => false,
+    })
+}
+
+pub fn prompt_for_pin(err_tx: Sender<String>) -> Listener<StatusUpdate> {
+    Box::new(move |update| match update {
+        StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
+            match rpassword::prompt_password("Enter PIN: ") {
+                Ok(pin) => {
+                    sender.send(Pin::new(pin.trim_end())).unwrap();
+                    false
+                }
+                Err(err) => {
+                    err_tx.send(err.to_string()).unwrap();
+                    true
+                }
+            }
+        }
+        StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts)) => {
+            match attempts {
+                Some(attempts) => println!("Invalid PIN, {} attempts remaining", attempts),
+                None => println!("Invalid PIN"),
+            }
+            match rpassword::prompt_password("Enter PIN: ") {
+                Ok(pin) => {
+                    sender.send(Pin::new(pin.trim_end())).unwrap();
+                    false
+                }
+                Err(err) => {
+                    err_tx.send(err.to_string()).unwrap();
+                    true
+                }
+            }
+        }
+        StatusUpdate::PinUvError(StatusPinUv::PinIsTooLong(size)) => {
+            err_tx
+                .send(format!("PIN is too long (max length {})", size))
+                .unwrap();
+            true
+        }
+        StatusUpdate::PinUvError(StatusPinUv::PinIsTooShort) => {
+            err_tx.send("PIN is too short".to_string()).unwrap();
+            true
+        }
         _ => false,
     })
 }

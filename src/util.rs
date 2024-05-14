@@ -1,5 +1,6 @@
 use std::{
     fmt::Debug,
+    io::{stdin, stdout, Write},
     sync::{Condvar, Mutex},
 };
 
@@ -27,6 +28,15 @@ pub fn display_option<T: Debug>(val: Option<T>) -> String {
 
 pub fn b64_starts_with(v: &Vec<u8>, prefix: &String) -> bool {
     base64_encode(v).starts_with(prefix)
+}
+
+pub fn prompt(msg: &str) -> Result<String, std::io::Error> {
+    println!("{}", msg);
+    print!("--> ");
+    stdout().flush()?;
+    let mut line = String::new();
+    stdin().read_line(&mut line)?;
+    Ok(line.trim_end().to_string())
 }
 
 pub struct SetOnce<T: Clone> {

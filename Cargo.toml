@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 authenticator = { git = "https://github.com/mozilla/authenticator-rs", version = "0.4.0-alpha.24", default-features = false, features = ["crypto_openssl"] }
 base64 = "0.22.1"
+clap = { version = "4.5.4", features = ["derive"] }
 env_logger = "0.11.3"
 getopts = "0.2.21"
 rand = "0.8.5"

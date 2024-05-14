@@ -16,15 +16,19 @@ use authenticator::{
     statecallback::StateCallback,
     Pin,
 };
+use clap::{Arg, Parser, Subcommand};
 use getopts::Options;
 use listen_loop::ListenLoop;
 use manage_session::ManageSession;
 use pretty_desc::PrettyDesc;
 use rand::{thread_rng, RngCore};
-use status_listeners::{capture_pin_error, login_with_pin, prompt_for_presence};
+use status_listeners::{capture_pin_error, prompt_for_pin, prompt_for_presence};
 use std::{
-    env, io::{stdin, stdout, Write}, process::exit, sync::mpsc::{channel, Receiver}
+    env,
+    process::exit,
+    sync::mpsc::{channel, Receiver},
 };
+use util::prompt;
 
 /*
 Usages:
@@ -42,15 +46,6 @@ static ORIGIN: &str = "https://webauthn.io";
 
 static TIMEOUT: u64 = 10000;
 
-fn prompt(msg: &str) -> Result<String, std::io::Error> {
-    println!("{}", msg);
-    print!("--> ");
-    stdout().flush()?;
-    let mut line = String::new();
-    stdin().read_line(&mut line)?;
-    Ok(line.trim_end().to_string())
-}
-
 fn callback_to_channel<T>() -> (Receiver<T>, StateCallback<T>)
 where
     T: Send + 'static,
@@ -62,8 +57,8 @@ where
     (receive_rx, callback)
 }
 
-fn list_credentials(pin: String) {
-    let mut session = ManageSession::new(pin);
+fn list_credentials() {
+    let mut session = ManageSession::new();
     let credentials = match session.list_credentials() {
         Ok(list) => list,
         Err(err) => {
@@ -77,8 +72,8 @@ fn list_credentials(pin: String) {
     println!("{}", credentials.desc());
 }
 
-fn get_credential(pin: String, prefix: String) {
-    let mut session = ManageSession::new(pin);
+fn get_credential(prefix: String) {
+    let mut session = ManageSession::new();
     let res = session.get_credential(prefix);
     match res {
         Ok((cred, rp)) => println!("{}\n{}", rp.desc(), cred.desc()),
@@ -86,8 +81,8 @@ fn get_credential(pin: String, prefix: String) {
     }
 }
 
-fn delete_credential(pin: String, prefix: String) {
-    let mut session = ManageSession::new(pin);
+fn delete_credential(prefix: String) {
+    let mut session = ManageSession::new();
     if let Err(err) = session.delete_credential(prefix) {
         println!("Error: {}", err);
         return;
@@ -140,31 +135,32 @@ fn get_assertion() {
     }
 }
 
-fn register_credential(pin: String) {
+fn register_credential(user_id: String, user_name: String, rp_id: String, origin: String) {
     let mut manager =
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
+    let (err_tx, err_rx) = channel();
     let mut listen_loop = ListenLoop::new();
-    listen_loop.add_listener(login_with_pin(pin));
+    listen_loop.add_listener(prompt_for_pin(err_tx));
     listen_loop.add_listener(prompt_for_presence());
 
     let mut chall_bytes = [0u8; 32];
     thread_rng().fill_bytes(&mut chall_bytes);
 
     let user = PublicKeyCredentialUserEntity {
-        id: USER_ID.as_bytes().to_vec(),
-        name: Some(USERNAME.to_string()),
+        id: user_id.as_bytes().to_vec(),
+        name: Some(user_name),
         display_name: None,
     };
     let relying_party = RelyingParty {
-        id: RP_NAME.to_string(),
+        id: rp_id,
         name: None,
     };
     let ctap_args = RegisterArgs {
         client_data_hash: chall_bytes,
         relying_party,
-        origin: ORIGIN.to_string(),
+        origin,
         user,
         pub_cred_params: vec![
             PublicKeyCredentialParameters {
@@ -196,17 +192,31 @@ fn register_credential(pin: String) {
             println!("{}", result.desc());
         }
         Err(x) => {
-            println!("Unexpected error: {}", x);
+            if let Ok(err) = err_rx.try_recv() {
+                println!("Error: {}", err);
+            } else {
+                println!("Unexpected error: {}", x);
+            }
         }
     }
 }
 
-fn set_pin(pin: String) {
+fn set_pin() {
+    let pin = match rpassword::prompt_password("Enter new PIN: ") {
+        Ok(pin) => pin.trim_end().to_string(),
+        Err(err) => {
+            println!("Error: {}", err);
+            return;
+        }
+    };
+
     let mut manager =
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
+    let (err_tx, err_rx) = channel();
     let mut listen_loop = ListenLoop::new();
+    listen_loop.add_listener(prompt_for_pin(err_tx));
     listen_loop.add_listener(prompt_for_presence());
     let (result_rx, callback) = callback_to_channel();
     manager
@@ -221,7 +231,11 @@ fn set_pin(pin: String) {
     match result {
         Ok(()) => println!("Success"),
         Err(err) => {
-            println!("Error: {}", err)
+            if let Ok(err) = err_rx.try_recv() {
+                println!("Error: {}", err);
+            } else {
+                println!("Error: {}", err);
+            }
         }
     }
 }
@@ -244,7 +258,9 @@ fn reset() {
     let mut listen_loop = ListenLoop::new();
     listen_loop.add_listener(prompt_for_presence());
     let (result_rx, callback) = callback_to_channel();
-    manager.reset(TIMEOUT, listen_loop.sender(), callback).unwrap();
+    manager
+        .reset(TIMEOUT, listen_loop.sender(), callback)
+        .unwrap();
     let result = result_rx.recv().unwrap();
     match result {
         Ok(()) => println!("Success"),
@@ -264,7 +280,6 @@ fn main() {
     let program = &args[0];
     let mut opts = Options::new();
     opts.optflag("h", "help", "Display this help message");
-    opts.optopt("", "pin", "PIN for the device", "1234");
     opts.optopt(
         "",
         "id",
@@ -278,7 +293,7 @@ fn main() {
         return;
     }
 
-    let get_opt = |name: &str| {
+    let _get_opt = |name: &str| {
         let val = &matches.opt_str(name);
         if let None = val {
             println!("Option required: {}", name);
@@ -301,26 +316,26 @@ fn main() {
 
     match command.as_str() {
         "list" => {
-            let pin = get_opt("pin");
-            list_credentials(pin);
+            list_credentials();
         }
         "set_pin" => {
-            let pin = get_opt("pin");
-            set_pin(pin);
+            set_pin();
         }
         "info" => {
-            let pin = get_opt("pin");
             let prefix = get_free_arg(1, "No ID specified");
-            get_credential(pin, prefix);
+            get_credential(prefix);
         }
         "delete" => {
-            let pin = get_opt("pin");
             let prefix = get_free_arg(1, "No ID specified");
-            delete_credential(pin, prefix);
+            delete_credential(prefix);
         }
         "create" => {
-            let pin = get_opt("pin");
-            register_credential(pin);
+            register_credential(
+                USER_ID.to_string(),
+                USERNAME.to_string(),
+                RP_NAME.to_string(),
+                ORIGIN.to_string(),
+            );
         }
         "sign" => {
             get_assertion();
