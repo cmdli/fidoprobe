@@ -2,15 +2,34 @@
 
 `fidoprobe` is a utility to list, delete, and inspect credentials on a FIDO2 device (such as a Yubikey or other passkey device).
 
+Note: It does not work with platform authenticators like TouchID or Windows Hello, as those don't use the USB HID API and instead have a separate API. Likewise, it will not work with browser extension-based passkeys (like Bitwarden) as those only exist in the browser.
+
 ## Installation
 
 ```
 cargo install fidoprobe
 ```
 
-## Example Usage
+## Usage
 
 ```
+> fidoprobe --help
+A utility to interact with FIDO2 devices
+
+Usage: fidoprobe <COMMAND>
+
+Commands:
+  list     List credentials
+  info     Get info for a particular credential
+  create   Create a new credential
+  delete   Delete a credential
+  set-pin  Set the PIN on an authenticator
+  reset    Reset an authenticator
+  sign     Sign a challenge with a credential
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
 > fidoprobe list
 Enter PIN:
 Authenticator: AAGuid(2fc0529f-8113-4eea-b116-bg5a8d592C2a)
