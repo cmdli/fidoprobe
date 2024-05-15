@@ -9,9 +9,7 @@ use authenticator::{
     authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
     crypto::COSEAlgorithm,
     ctap2::server::{
-        AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters,
-        PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement,
-        UserVerificationRequirement,
+        AuthenticationExtensionsClientInputs, PublicKeyCredentialParameters, PublicKeyCredentialUserEntity, RelyingParty, ResidentKeyRequirement, UserVerificationRequirement
     },
     statecallback::StateCallback,
     Pin,
@@ -287,20 +285,20 @@ enum Commands {
     },
     #[command(about = "Create a new credential")]
     Create {
-        #[arg(long, value_name = "ID", help = "ID of the user (e.g. \"aLiCe\")", default_values=vec!["user_id"])]
+        #[arg(long, value_name = "ID", help = "ID of the user (e.g. \"aLiCe\")", default_value_t = String::from("user_id"))]
         id: String,
-        #[arg(long, help = "Name of the user", default_values=vec!["username"])]
+        #[arg(long, help = "Name of the user", default_value_t = String::from("username"))]
         name: String,
         #[arg(
             long,
             help = "ID of the relying party (usually a website, e.g. \"webauthn.io\")",
-            default_values = vec!["example.com"]
+            default_value_t = String::from("example.com")
         )]
         rp: String,
         #[arg(
             long,
             help = "Website origin of the relying party (e.g. \"example.com\")",
-            default_values = vec!["example.com"]
+            default_value_t = String::from("example.com")
         )]
         origin: String,
     },
