@@ -1,6 +1,6 @@
 [package]
 name = "fidoprobe"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["chris@cmdli.dev"]
 readme = "README.md"
