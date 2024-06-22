@@ -261,6 +261,13 @@ fn reset() {
     }
 }
 
+fn auth_info() {
+    let session = ManageSession::new();
+    if let Some(info) = session.auth_info() {
+        println!("{}", info.desc())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(about = "A utility to interact with FIDO2 devices")]
 struct Args {
@@ -316,6 +323,8 @@ enum Commands {
     Reset {},
     #[command(about = "Sign a challenge with a credential")]
     Sign { id: String },
+    #[command(about = "Get info about an authenticator")]
+    AuthInfo {},
 }
 
 fn main() {
@@ -346,6 +355,9 @@ fn main() {
         }
         Commands::Reset {} => {
             reset();
+        }
+        Commands::AuthInfo {} => {
+            auth_info();
         }
     }
 }

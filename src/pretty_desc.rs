@@ -5,9 +5,9 @@ use authenticator::{
             AttestationStatement, AttestationStatementPacked, AttestedCredentialData,
             AuthenticatorData,
         },
-        commands::credential_management::{
+        commands::{credential_management::{
             CredentialList, CredentialListEntry, CredentialRpListEntry,
-        },
+        }, get_info::AuthenticatorOptions},
         server::{
             CredentialProtectionPolicy, PublicKeyCredentialDescriptor,
             PublicKeyCredentialUserEntity, RelyingParty,
@@ -292,11 +292,25 @@ impl PrettyDescImpl for AuthenticatorInfo {
         lines.push(format!("    Versions: {:?}", self.versions));
         lines.push(format!("    Extensions: {:?}", self.extensions));
         lines.push(format!("    AAGUID: {:?}", self.aaguid));
-        lines.push(format!("    Options: {:?}", self.options));
+        lines.extend(self.options.child_desc());
         lines.push(format!(
             "    Max Message Size: {:?}",
             display_option(self.max_msg_size)
         ));
+        lines
+    }
+}
+
+impl PrettyDescImpl for AuthenticatorOptions {
+    fn desc_lines(&self) -> Vec<String> {
+        let mut lines = vec![];
+        lines.push(format!("Options:"));
+        lines.push(format!("    Platform device: {}", self.platform_device));
+        lines.push(format!("    Supports resident keys: {}", self.resident_key));
+        lines.push(format!("    Supports PIN: {}", self.client_pin.is_some()));
+        lines.push(format!("    Has PIN: {}", self.client_pin.unwrap_or(false)));
+        lines.push(format!("    Supports user presence: {}", self.user_presence));
+        lines.push(format!("    Supports user verification: {}", self.user_verification.is_some()));
         lines
     }
 }
