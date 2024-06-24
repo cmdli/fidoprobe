@@ -6,7 +6,7 @@ authors = ["chris@cmdli.dev"]
 readme = "README.md"
 license = "MIT"
 description = "A tool to manage FIDO2 devices"
-homepage = "https://github.com/cmdli/fidoprobe"
+repository = "https://github.com/cmdli/fidoprobe"
 keywords = ["fido", "fido2", "passkey"]
 categories = ["command-line-utilities"]
 
